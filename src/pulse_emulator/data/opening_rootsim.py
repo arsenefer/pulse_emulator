@@ -122,12 +122,12 @@ def get_shower_properties(root_dir, start=0, stop=None):
     properties = {**meta_data, **efield_data}
     return antenna_pos, properties
 
-def get_traces(root_dir, start, stop=None, voltage=False):
+def get_traces(root_dir, start, stop=None, adc=False):
     efield_files = sorted(glob(f'{root_dir}/efield_*_L0_*.root'))
     adc_files = sorted(glob(f'{root_dir}/adc*_L1_*.root'))
     shower_meta_data_files = sorted(glob(f'{root_dir}/shower_*_L0_*.root'))
     overlap, first_indices, last_indices = _get_rootfiles_between_bounds(shower_meta_data_files, start, stop)
-    all_traces, du_ids, file_names = [], [], []
+    all_efield_traces, du_ids, file_names = [], [], []
     all_traces_adc = []
     theta, azimuth = np.array([]), np.array([])
     event_number = np.array([])
@@ -150,7 +150,7 @@ def get_traces(root_dir, start, stop=None, voltage=False):
         
         with uproot.open(efield_file) as f:
             efield_tree = f['tefield']
-            batch_traces = efield_tree['trace'].array(
+            batch_efield_traces = efield_tree['trace'].array(
                 entry_start=start_index, entry_stop=stop_index)
             batch_event_number = efield_tree['event_number'].array(
                 entry_start=start_index, entry_stop=stop_index).to_numpy()
@@ -159,33 +159,33 @@ def get_traces(root_dir, start, stop=None, voltage=False):
             
             event_number = np.concatenate([event_number, batch_event_number])
             du_ids += [du_id.to_numpy() for du_id in batch_du_id]
-            all_traces += [trace.to_numpy() for trace in batch_traces]
-        if voltage:
+            all_efield_traces += [trace.to_numpy() for trace in batch_efield_traces]
+        if adc:
             with uproot.open(adc_file) as f:
                 adc_tree = f['tadc']
-                batch_traces = adc_tree['trace_ch'].array(
+                batch_adc_traces = adc_tree['trace_ch'].array(
                     entry_start=start_index, entry_stop=stop_index)
-                all_traces_adc += [trace.to_numpy() for trace in batch_traces]
+                all_traces_adc += [trace.to_numpy() for trace in batch_adc_traces]
                 
         file_names += [root_dir.split('/')[-1]] * (stop_index - start_index)
 
-    if voltage:
-        return all_traces, all_traces_adc, du_ids, event_number, file_names, theta, azimuth
-    return all_traces, du_ids, event_number, file_names, theta, azimuth
+    if adc:
+        return all_efield_traces, all_traces_adc, du_ids, event_number, file_names, theta, azimuth
+    return all_efield_traces, du_ids, event_number, file_names, theta, azimuth
 
 
-def get_traces_single_event(root_dir, event_number, all_event_numbers=None, voltage=False):
+def get_traces_single_event(root_dir, event_number, all_event_numbers=None, adc=False):
     if all_event_numbers is None:
         all_event_numbers = _get_all_event_numbers( root_dir )
     index = np.where(all_event_numbers == event_number)[0][0]
-    if voltage:
-        all_traces, all_trace_adc, du_ids, event_number_n, _, theta, azimuth= get_traces(root_dir, index, index+1, voltage=True)
+    if adc:
+        all_efield_traces, all_trace_adc, du_ids, event_number_n, _, theta, azimuth= get_traces(root_dir, index, index+1, adc=True)
         assert event_number_n[0] == event_number, "Event number mismatch."
-        return all_traces[0], all_trace_adc[0], du_ids[0], theta, azimuth
+        return all_efield_traces[0], all_trace_adc[0], du_ids[0], theta, azimuth
     else:
-        all_traces, du_ids, event_number_n, _, theta, azimuth= get_traces(root_dir, index, index+1)
+        all_efield_traces, du_ids, event_number_n, _, theta, azimuth= get_traces(root_dir, index, index+1)
         assert event_number_n[0] == event_number, "Event number mismatch."
-        return all_traces[0], du_ids[0], theta, azimuth
+        return all_efield_traces[0], du_ids[0], theta, azimuth
 
 def get_properties_single_event(root_dir, event_number, all_event_numbers=None):
     if all_event_numbers is None:
@@ -198,8 +198,8 @@ def get_properties_single_event(root_dir, event_number, all_event_numbers=None):
     antenna_pos = all_antenna_pos[properties['du_id']]
     return antenna_pos, properties
     
-def get_traces_single_du(root_dir, event_number, du_id, all_event_numbers=None, voltage=False):
-    event_traces, du_ids, theta, azimuth = get_traces_single_event(root_dir, event_number, all_event_numbers=all_event_numbers, voltage=voltage)
+def get_traces_single_du(root_dir, event_number, du_id, all_event_numbers=None, adc=False):
+    event_traces, du_ids, theta, azimuth = get_traces_single_event(root_dir, event_number, all_event_numbers=all_event_numbers, adc=adc)
     index = np.where(du_ids == du_id)[0][0]
     trace_3d = event_traces[index]
 

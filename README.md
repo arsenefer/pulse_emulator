@@ -61,6 +61,9 @@ model, model_config = load_model(base_model_path, model_subdir, inference_only=T
   `jobs/` contains a SLURM job template (`job_example.sh`) and a launcher
   (`run_last_train.py`) that shards events across jobs.
 - `scripts/generation_example.py` — standalone example producing emulated traces.
+- `scripts/convert_joblib.py` — re-saves the models' `.joblib` classifiers for the scikit-learn
+  of the current environment (e.g. 1.3.2 pickles on Python 3.13), keeping the originals as backups.
+  `load_model` points to it when a classifier fails to load.
 
 Run the scripts **from the repository root** (e.g. `python scripts/train/train_models.py ...`):
 they add `scripts/` to `sys.path` with a relative path and read configs relative to the root.

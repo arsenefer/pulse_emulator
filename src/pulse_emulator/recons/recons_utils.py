@@ -165,7 +165,7 @@ class EventContext:
     def __init__(self, df_ev, config_inputs, model, fs_ds,
                  t_SN, t_EW, t_Z, tf,
                  measured_signal, times_noisy, 
-                 pad_left=0, pad_right=0,
+                 pad_left=0, pad_right=0, duration=2.048,
                  noise_computer=None, smearing=None, sigma_t=None,
                  alpha=0.5, n_2=5,
                  k_guess=None, Xs_guess=None,
@@ -253,7 +253,6 @@ class EventContext:
         
 
         # Pre-extract the duration and frequency axis for pred_trace_kxB
-        duration = 2.048
         self.trace_len = int(fs_ds * duration)
         self.phase_shift = 0
         if self.pad_right == self.trace_len//2:

@@ -9,6 +9,7 @@ from make_input import load_input_params_from_dict
 
 from pulse_emulator.data.input_formating import make_input_array
 from pulse_emulator.surrogate.inference import pred_trace_kxB, predict_voltage
+from pulse_emulator.utils import load_classifier
 from pulse_emulator.surrogate.models import (
     COVAR_PARAM_DEFAULT,
     MLP_metamodel,
@@ -18,7 +19,6 @@ from pulse_emulator.surrogate.models import (
 )
 
 sys.path.append('scripts/')  
-import joblib
 from local_paths import BASE_MODEL_PATH, BASE_ROOT, RF_PARAMS_CONFIG_FILE
 
 CONFIG = {
@@ -131,10 +131,7 @@ def load_model_and_config(cfg):
     model.to("cpu")
     model.device = "cpu"
 
-    clsf = joblib.load(model_dir / "hist_gbdt.joblib")
-    # Older HistGradientBoostingClassifier pickles lack `_preprocessor` on newer scikit-learn.
-    if clsf.__class__.__name__ == "HistGradientBoostingClassifier" and not hasattr(clsf, "_preprocessor"):
-        clsf._preprocessor = None
+    clsf = load_classifier(model_dir / "hist_gbdt.joblib")
     gated_model = MLPClassifierGated(model, clsf)
 
     return gated_model, model_cfg
@@ -265,7 +262,7 @@ if __name__ == "__main__":
     root_dir = f"{BASE_ROOT}/sim_Xiaodushan_20221025_220000_RUN0_CD_GP300ZHAireS-NJ_0004"
     all_event_numbers = _get_all_event_numbers(root_dir)
     amp = 0
-    while amp < 50:
+    while amp < 100:
         event_number = 1791
         event_number = np.random.choice(all_event_numbers)
         antenna_pos, properties = get_properties_single_event(root_dir, event_number)

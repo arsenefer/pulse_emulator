@@ -517,6 +517,34 @@ def load_datasets(base_data_path: str, include_val: bool = True, include_test: b
 # DATA & MODEL LOADING
 # =============================================================================
 
+def load_classifier(path):
+    """Load the hist_gbdt validity classifier saved next to a model.
+
+    A pickle written by another scikit-learn version may fail to load (e.g. 1.3.2 pickles on
+    Python 3.13); the error then gives the command that converts it to the installed version.
+    """
+    try:
+        clsf = joblib.load(path)
+    except FileNotFoundError:
+        raise
+    except Exception as e:
+        import sklearn
+        raise RuntimeError(
+            f"Could not load {path} with scikit-learn {sklearn.__version__} "
+            f"({type(e).__name__}: {e}).\n"
+            f"It was most likely saved with another scikit-learn version. Convert it to this one by "
+            f"running, from the pulse_emulator repository root and in this environment:\n"
+            f"    python scripts/convert_joblib.py {os.path.dirname(os.path.abspath(path))}\n"
+            f"(the original is kept as a backup next to it)"
+        ) from e
+    # Backward compatibility for HistGradientBoostingClassifier objects saved
+    # with older scikit-learn versions. Newer versions expect `_preprocessor`
+    # to exist after fitting; older pickles may not have it.
+    if clsf.__class__.__name__ == "HistGradientBoostingClassifier" and not hasattr(clsf, "_preprocessor"):
+        clsf._preprocessor = None
+    return clsf
+
+
 def load_model(base_model_path: str, model_subdir: str, device: str = 'cpu',
                inference_only: bool = False, checkpoint: str = 'best',
                calibrated: bool = False):
@@ -588,12 +616,7 @@ def load_model(base_model_path: str, model_subdir: str, device: str = 'cpu',
     model.to(device)
     model.device = device
 
-    clsf = joblib.load(f"{model_dir}/hist_gbdt.joblib")
-    # Backward compatibility for HistGradientBoostingClassifier objects saved
-    # with older scikit-learn versions. Newer versions expect `_preprocessor`
-    # to exist after fitting; older pickles may not have it.
-    if clsf.__class__.__name__ == "HistGradientBoostingClassifier" and not hasattr(clsf, "_preprocessor"):
-        clsf._preprocessor = None
+    clsf = load_classifier(f"{model_dir}/hist_gbdt.joblib")
     gated_model = MLPClassifierGated(model, clsf)
     gated_model.checkpoint_path = ckpt_path
 
