@@ -215,7 +215,7 @@ def _thinned_psd(n_freq, ctx):
     return np.where(thinning_mask, ctx.psd[None], np.inf)
 
 
-def _matched_filter_correlations(voltage_traces_f, ctx):
+def _matched_filter_correlations(voltage_traces_f, ctx, per_channel=False):
     """Matched-filter log-likelihood of each DU as a function of the time shift.
 
     2*tm - tt - mm - logdet.  This is the *only* place the matched filter is
@@ -226,9 +226,12 @@ def _matched_filter_correlations(voltage_traces_f, ctx):
 
     voltage_traces_f : (n_du, n_pol, n_freq) or (n_du, M, n_pol, n_freq)
     returns          : (n_du, N)             or (n_du, M, N)
+                       (n_du, n_pol, N)      or (n_du, M, n_pol, N)  if per_channel
 
-    The sum over pol is taken before the irfft — irfft is linear, so this is one
-    transform per DU instead of one per DU and pol.
+    By default the sum over pol is taken before the irfft — irfft is linear, so
+    this is one transform per DU instead of one per DU and pol. per_channel=True
+    keeps the channels apart, so that each one can take its own time shift; the
+    sum over channels of the result is then the per-DU value at equal shifts.
     """
     dt = 1/ctx.fs_ds
     df = 1 / ctx.duration
@@ -241,12 +244,17 @@ def _matched_filter_correlations(voltage_traces_f, ctx):
     if getattr(ctx, 'model_uncertainty', 0.0) > 0:
         psd = psd + ctx.model_uncertainty**2 * np.abs(voltage_traces_f)**2
 
-    tm = 0.5 * np.fft.irfft(np.sum(mfft * np.conjugate(voltage_traces_f) / psd, axis=-2), axis=-1) / dt
-    tt = np.sum(np.abs(voltage_traces_f)**2 / psd, axis=(-2,-1))[..., None] * df
-    mm = np.sum(np.abs(mfft)**2 / psd, axis=(-2,-1))[..., None] * df
-    logdet = np.sum(np.log(
-        np.where(psd==np.inf, 1, psd)
-        ), axis=(-2,-1))[..., None]
+    cross = mfft * np.conjugate(voltage_traces_f) / psd                    # (..., n_pol, n_freq)
+    tt = np.abs(voltage_traces_f)**2 / psd
+    mm = np.abs(mfft)**2 / psd
+    logdet = np.log(np.where(psd == np.inf, 1, psd))
+    if not per_channel:                                                    # sum the channels first
+        cross, tt, mm, logdet = (np.sum(a, axis=-2) for a in (cross, tt, mm, logdet))
+
+    tm = 0.5 * np.fft.irfft(cross, axis=-1) / dt
+    tt = np.sum(tt, axis=-1, keepdims=True) * df
+    mm = np.sum(mm, axis=-1, keepdims=True) * df
+    logdet = np.sum(logdet, axis=-1, keepdims=True)
     correlations = 2*tm - tt - mm - logdet
     correlations = 1/2 * correlations
     #if alpha = 0 only shape (small divisor), if alpha = 1 only time (huge divisor),
@@ -256,17 +264,24 @@ def _matched_filter_correlations(voltage_traces_f, ctx):
     return correlations / divisor
 
 
-def per_antenna_matched_filtering_indep_marginalized(voltage_traces_f_samples, ctx, log_weights=None):
+def _best_shift(correlations, per_channel):
+    """Max over the time shift; with per_channel, each channel takes its own shift and they are summed."""
+    best = correlations.max(axis=-1)
+    return best.sum(axis=-1) if per_channel else best
+
+
+def per_antenna_matched_filtering_indep_marginalized(voltage_traces_f_samples, ctx, log_weights=None, per_channel=False):
     """
-    Per-DU independent matched-filter log-likelihood: max over shift per DU,
-    marginalized over model-uncertainty samples, NOT summed over antennas.
+    Per-DU independent matched-filter log-likelihood: max over shift per DU
+    (per DU and channel if per_channel), marginalized over model-uncertainty
+    samples, NOT summed over antennas.
 
     voltage_traces_f_samples: (n_du, M, 3, Nf) — M quadrature points from model uncertainty.
     log_weights: (M,) log-weights for each point; None means uniform (MC behaviour).
     Returns (n_du,) — one log-likelihood value per antenna.
     """
-    correlations = _matched_filter_correlations(voltage_traces_f_samples, ctx)  # (n_du, M, N)
-    per_du = correlations.max(axis=-1)                       # (n_du, M), no time alignment
+    correlations = _matched_filter_correlations(voltage_traces_f_samples, ctx, per_channel=per_channel)
+    per_du = _best_shift(correlations, per_channel)          # (n_du, M), no time alignment
 
     M = per_du.shape[1]
     if log_weights is None:
@@ -274,19 +289,20 @@ def per_antenna_matched_filtering_indep_marginalized(voltage_traces_f_samples, c
     return logsumexp(per_du + log_weights[None, :], axis=1)  # (n_du,)
 
 
-def match_filtering_indep_marginalized(voltage_traces_f_samples, ctx, log_weights=None):
+def match_filtering_indep_marginalized(voltage_traces_f_samples, ctx, log_weights=None, per_channel=False):
     """
     voltage_traces_f_samples: (n_du, M, 3, Nf) — M quadrature points from model uncertainty.
     log_weights: (M,) log-weights for each point; None means uniform (MC behaviour).
     Returns marginal log-likelihood, summed over DUs.
     """
-    ll_du = per_antenna_matched_filtering_indep_marginalized(voltage_traces_f_samples, ctx, log_weights=log_weights)
+    ll_du = per_antenna_matched_filtering_indep_marginalized(voltage_traces_f_samples, ctx, log_weights=log_weights,
+                                                             per_channel=per_channel)
     return ll_du.sum()
 
 
-def match_filtering_indep(voltage_traces_f, ctx):
-    correlations = _matched_filter_correlations(voltage_traces_f, ctx)
-    return correlations.max(axis=-1).sum()
+def match_filtering_indep(voltage_traces_f, ctx, per_channel=False):
+    correlations = _matched_filter_correlations(voltage_traces_f, ctx, per_channel=per_channel)
+    return _best_shift(correlations, per_channel).sum()
 
 
 def _interf_align(out, t_swf, ctx):
@@ -379,20 +395,22 @@ def match_filtering_interf_marginalized(voltage_traces_f_samples, t_swf, ctx, lo
     # ])
     # return logsumexp(lls + log_weights)
 
-def log_likelihood_matched_filtering_indep(params, ctx, smear=None):
+def log_likelihood_matched_filtering_indep(params, ctx, smear=None, per_channel=False):
     dt = 1/ctx.fs_ds
     values, antenna_pos, xmax_shifted = apply_shift(params, ctx)
     Xs_first = xmax_shifted[0]
     input_arr, (k, kxB_loc, kxkxB) = make_input_array(values, ctx.config_inputs)
     voltage_traces_f = predict_voltage(input_arr, kxB_loc, antenna_pos, Xs_first,
                                      ctx.model, ctx.fs_ds,
-                                     ctx.t_SN, ctx.t_EW, ctx.t_Z, ctx.tf, duration=ctx.duration, compute_td=False) * dt
+                                     ctx.t_SN, ctx.t_EW, ctx.t_Z, ctx.tf, duration=ctx.duration, compute_td=False,
+                                     slope_offset=ctx.slope_offset) * dt
 
-    log_probas_total = match_filtering_indep(voltage_traces_f, ctx)
+    log_probas_total = match_filtering_indep(voltage_traces_f, ctx, per_channel=per_channel)
     return log_probas_total
 
 def log_likelihood_matched_filtering_indep_marginalized(params, ctx, smear=None,
-                                                         quadrature_method='mc', n_gh_pts=3, kappa=1.0, n_samples=20):
+                                                         quadrature_method='mc', n_gh_pts=3, kappa=1.0, n_samples=20,
+                                                         per_channel=False):
     dt = 1/ctx.fs_ds
     values, antenna_pos, xmax_shifted = apply_shift(params, ctx)
     Xs_first = xmax_shifted[0]
@@ -400,11 +418,12 @@ def log_likelihood_matched_filtering_indep_marginalized(params, ctx, smear=None,
     voltage_traces_f_samples, log_weights = predict_voltage(
         input_arr, kxB_loc, antenna_pos, Xs_first,
         ctx.model, ctx.fs_ds, ctx.t_SN, ctx.t_EW, ctx.t_Z, ctx.tf,
-        duration=ctx.duration, compute_td=False, marginal=True, n_samples=n_samples,
+        duration=ctx.duration, compute_td=False, slope_offset=ctx.slope_offset, marginal=True, n_samples=n_samples,
         quadrature_method=quadrature_method, n_gh_pts=n_gh_pts, kappa=kappa,
     )
     voltage_traces_f_samples = voltage_traces_f_samples * dt
-    return match_filtering_indep_marginalized(voltage_traces_f_samples, ctx, log_weights=log_weights)
+    return match_filtering_indep_marginalized(voltage_traces_f_samples, ctx, log_weights=log_weights,
+                                              per_channel=per_channel)
 
 
 def log_likelihood_matched_filtering_interf(params, ctx, smear=None):
@@ -527,7 +546,7 @@ def log_likelihood_matched_filtering_interf_marginalized_vect(params, ctx, smear
                                                                                 log_weights=log_weights)
     return log_probas_total
 
-def log_likelihood_matched_filtering_indep_vect(params, ctx, smear=None, batch_size=None):
+def log_likelihood_matched_filtering_indep_vect(params, ctx, smear=None, batch_size=None, per_channel=False):
     """See `log_likelihood_matched_filtering_interf_vect` for what batch_size does."""
     dt = 1/ctx.fs_ds
     params = params.reshape(-1, params.shape[-1])
@@ -543,10 +562,10 @@ def log_likelihood_matched_filtering_indep_vect(params, ctx, smear=None, batch_s
         voltage_traces_predicted_f = voltage_traces_predicted_f * dt   # (chunk*n_du, n_pol, n_freq)
         for j in range(len(Xmax_cand)):
             voltage_traces_f = voltage_traces_predicted_f[j*n_dus:(j+1)*n_dus]
-            log_probas_total[start + j] = match_filtering_indep(voltage_traces_f, ctx)
+            log_probas_total[start + j] = match_filtering_indep(voltage_traces_f, ctx, per_channel=per_channel)
     return log_probas_total
 
-def log_likelihood_matched_filtering_indep_marginalized_vect(params, ctx, smear=None,quadrature_method='mc', n_gh_pts=3, kappa=1.0, n_samples=20, precomputed_model_out=None, batch_size=None, return_per_antenna=False):
+def log_likelihood_matched_filtering_indep_marginalized_vect(params, ctx, smear=None,quadrature_method='mc', n_gh_pts=3, kappa=1.0, n_samples=20, precomputed_model_out=None, batch_size=None, return_per_antenna=False, per_channel=False):
     """See `log_likelihood_matched_filtering_interf_marginalized_vect` for what
     batch_size does and why precomputed_model_out forces a single chunk.
 
@@ -573,9 +592,22 @@ def log_likelihood_matched_filtering_indep_marginalized_vect(params, ctx, smear=
         for j in range(len(Xmax_cand)):
             voltage_traces_f = voltage_traces_predicted_f[j*n_dus:(j+1)*n_dus]
             per_du = per_antenna_matched_filtering_indep_marginalized(voltage_traces_f, ctx,
-                                                                      log_weights=log_weights)
+                                                                      log_weights=log_weights,
+                                                                      per_channel=per_channel)
             log_probas_total[start + j] = per_du if return_per_antenna else per_du.sum()
     return log_probas_total
+
+
+# Independent per channel: like the indep likelihoods, but each channel of each DU
+# takes its own best time shift before the channels and DUs are summed.
+log_likelihood_matched_filtering_indep_channel = functools.partial(
+    log_likelihood_matched_filtering_indep, per_channel=True)
+log_likelihood_matched_filtering_indep_channel_vect = functools.partial(
+    log_likelihood_matched_filtering_indep_vect, per_channel=True)
+log_likelihood_matched_filtering_indep_channel_marginalized = functools.partial(
+    log_likelihood_matched_filtering_indep_marginalized, per_channel=True)
+log_likelihood_matched_filtering_indep_channel_marginalized_vect = functools.partial(
+    log_likelihood_matched_filtering_indep_marginalized_vect, per_channel=True)
 
 
 def log_prob(
@@ -605,8 +637,12 @@ def log_prob(
     vectorized : bool or None
         If True, treat input as a batch. If None, infer from input shape.
     likelihood_type : str or None
-        One of 'pulse', 'hybrid', 'amplitude',
-        'matched_filtering_high_snr', 'matched_filtering'.
+        One of 'amplitude', 'matched_filtering', 'matched_filtering_marginalized',
+        'matched_filtering_indep', 'matched_filtering_indep_marginalized',
+        'matched_filtering_indep_channel', 'matched_filtering_indep_channel_marginalized'
+        ('pulse', 'hybrid' and 'matched_filtering_high_snr' are not available).
+        indep: each DU takes its own best time shift; indep_channel: each
+        channel of each DU takes its own best time shift.
         If None, use ctx.likelihood_type when present, otherwise 'pulse'.
     likelihood_func : callable or None
         Custom likelihood function. If provided, it overrides likelihood_type.
@@ -691,9 +727,16 @@ def log_prob(
             likelihood_is_vectorized = vectorized
             if vectorized and config_batch_size is not None:
                 likelihood_func = functools.partial(likelihood_func, batch_size=config_batch_size)
-        elif likelihood_type == 'matched_filtering_indep_marginalized':
+        elif likelihood_type == 'matched_filtering_indep_channel':
+            likelihood_func = (log_likelihood_matched_filtering_indep_channel_vect if vectorized
+                               else log_likelihood_matched_filtering_indep_channel)
+            likelihood_is_vectorized = vectorized
+            if vectorized and config_batch_size is not None:
+                likelihood_func = functools.partial(likelihood_func, batch_size=config_batch_size)
+        elif likelihood_type in ('matched_filtering_indep_marginalized', 'matched_filtering_indep_channel_marginalized'):
             _base = (log_likelihood_matched_filtering_indep_marginalized_vect if vectorized
                      else log_likelihood_matched_filtering_indep_marginalized)
+            _base = functools.partial(_base, per_channel=likelihood_type == 'matched_filtering_indep_channel_marginalized')
             likelihood_func = functools.partial(_base, quadrature_method=quadrature_method,
                                                 n_gh_pts=n_gh_pts, kappa=kappa, n_samples=n_samples)
             if vectorized and config_batch_size is not None:

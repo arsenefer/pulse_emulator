@@ -301,7 +301,7 @@ class EventContext:
 
         if self.thinning_freqs is None:
             self.thinning_freqs = np.full_like(times_noisy, 240)
-        self.thinning_idx = np.minimum(240, (self.thinning_freqs/df).astype(int))
+        self.thinning_idx = (np.minimum(self.thinning_freqs, 240) / df).astype(int)   # first bin cut, at most 240 MHz
         
         # Check if 'n_eff' is in config_inputs (for SWF with refraction)
         self.has_n_eff = 'n_eff' in config_inputs
